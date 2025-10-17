@@ -243,7 +243,7 @@ function list_summary(mysqli $conn, $params) {
     $year = isset($params['financial_year']) ? (int)$params['financial_year'] : null;
     $companyId = isset($params['company_id']) ? (int)$params['company_id'] : null;
 
-    $sql = "SELECT entry_date, entry_type, doc_no, staff_name, company_name, financial_year, department_code, description, '' AS description2, hours AS in_out_qty, unit_cost, total_cost, in_out FROM time_cost_entries WHERE entry_date BETWEEN ? AND ?";
+    $sql = "SELECT entry_id, entry_date, entry_type, doc_no, staff_name, company_name, financial_year, department_code, description, '' AS description2, hours AS in_out_qty, unit_cost, total_cost, in_out FROM time_cost_entries WHERE entry_date BETWEEN ? AND ?";
     $types = 'ss';
     $vals = [$from, $to];
     if ($dept) { $sql .= " AND department_code = ?"; $types .= 's'; $vals[] = $dept; }
@@ -288,6 +288,7 @@ function list_summary(mysqli $conn, $params) {
     } else {
         // Fallback when mysqlnd is not available
         $stmt->bind_result(
+            $entry_id,
             $entry_date,
             $entry_type,
             $doc_no,
@@ -308,6 +309,7 @@ function list_summary(mysqli $conn, $params) {
             $balQty += $sign * $qty;
             $balCost += $sign * (float)$total_cost;
             $rows[] = [
+                'entry_id' => (int)$entry_id,
                 'entry_date' => $entry_date,
                 'entry_type' => $entry_type,
                 'doc_no' => $doc_no,
