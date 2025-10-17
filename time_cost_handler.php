@@ -9,6 +9,95 @@ function json_response($ok, $data = null, $message = '') {
     exit;
 }
 
+/**
+ * Ensure the required tables exist for the Time Cost feature.
+ * This avoids manual execution of the create_time_cost_tables.sql file.
+ */
+function ensure_time_cost_schema(mysqli $conn): void {
+    // time_departments
+    $conn->query(
+        "CREATE TABLE IF NOT EXISTS time_departments (
+            dept_id INT AUTO_INCREMENT PRIMARY KEY,
+            code VARCHAR(20) NOT NULL UNIQUE,
+            description VARCHAR(100) NOT NULL,
+            parent_code VARCHAR(20) DEFAULT NULL,
+            INDEX idx_parent_code (parent_code)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
+
+    // user_hourly_rates
+    $conn->query(
+        "CREATE TABLE IF NOT EXISTS user_hourly_rates (
+            rate_id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            effective_from DATE NOT NULL,
+            hourly_rate DECIMAL(10,2) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_user_effective (user_id, effective_from)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
+
+    // time_cost_entries
+    $conn->query(
+        "CREATE TABLE IF NOT EXISTS time_cost_entries (
+            entry_id INT AUTO_INCREMENT PRIMARY KEY,
+            entry_date DATE NOT NULL,
+            entry_type ENUM('PI','ADJ') DEFAULT 'PI',
+            doc_no VARCHAR(50) DEFAULT NULL,
+            company_id INT DEFAULT NULL,
+            company_name VARCHAR(255) DEFAULT NULL,
+            staff_name VARCHAR(255) NOT NULL,
+            user_id INT DEFAULT NULL,
+            financial_year INT NOT NULL,
+            department_code VARCHAR(20) NOT NULL,
+            hours DECIMAL(7,2) NOT NULL,
+            unit_cost DECIMAL(10,2) NOT NULL,
+            total_cost DECIMAL(12,2) NOT NULL,
+            description TEXT,
+            in_out ENUM('In','Out') DEFAULT 'In',
+            created_by INT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_date (entry_date),
+            INDEX idx_year (financial_year),
+            INDEX idx_dept (department_code),
+            INDEX idx_company (company_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
+
+    // Add FK if not already present (MySQL doesn't support IF NOT EXISTS for FKs; wrap in try/catch via @)
+    // Ensure a department exists to satisfy NOT NULL+FK usage when UI omits it
+    $seedSql = "INSERT IGNORE INTO time_departments (code, description) VALUES
+        ('10-CoForm','10-Company Formation'),
+        ('11-InvForm','11-Invoice Form'),
+        ('1-Sorting','1-Sorting'),
+        ('2-Filing','2-Filing'),
+        ('3-DataEnt','3-Data Entry'),
+        ('4-Payroll','4-Payroll'),
+        ('5-Admin','5-Admin'),
+        ('6-PreAudit','6-PreAudit'),
+        ('7-Packing','7-Packing'),
+        ('8-Despatch','8-Despatch'),
+        ('9-Software','9-Software'),
+        ('Z ONLEAVE','On Leave (non-productive)')";
+    $conn->query($seedSql);
+
+    // Attempt to add FK only if not present
+    $fkCheck = $conn->query("SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'time_cost_entries' AND CONSTRAINT_TYPE = 'FOREIGN KEY'");
+    $hasDeptFK = false;
+    if ($fkCheck) {
+        while ($row = $fkCheck->fetch_assoc()) {
+            if (stripos($row['CONSTRAINT_NAME'], 'dept') !== false || stripos($row['CONSTRAINT_NAME'], 'department') !== false) {
+                $hasDeptFK = true; break;
+            }
+        }
+        $fkCheck->close();
+    }
+    if (!$hasDeptFK) {
+        // Add a named FK; ignore if it fails (e.g. already exists under another name)
+        @$conn->query("ALTER TABLE time_cost_entries ADD CONSTRAINT fk_time_dept_code FOREIGN KEY (department_code) REFERENCES time_departments(code)");
+    }
+}
+
 function get_effective_rate(mysqli $conn, $userId, $entryDate) {
     if (!$userId) return null;
     $stmt = $conn->prepare("SELECT hourly_rate FROM user_hourly_rates WHERE user_id = ? AND effective_from <= ? ORDER BY effective_from DESC LIMIT 1");
@@ -32,12 +121,25 @@ function create_time_entry(mysqli $conn, $payload) {
     $staffName = $payload['staff_name'] ?? '';
     $userId = isset($payload['user_id']) ? (int)$payload['user_id'] : (isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null);
     $financialYear = isset($payload['financial_year']) ? (int)$payload['financial_year'] : (int)date('Y');
-    $deptCode = $payload['department_code'] ?? '';
+    $deptCode = trim($payload['department_code'] ?? '');
     $hours = isset($payload['hours']) ? (float)$payload['hours'] : 0.0;
     $unitCost = isset($payload['unit_cost']) ? (float)$payload['unit_cost'] : null;
     $description = $payload['description'] ?? null;
         $inOut = $payload['in_out'] ?? 'In';
     $createdBy = isset($payload['created_by']) ? (int)$payload['created_by'] : 0;
+
+    // Basic validation
+    if (!$staffName) {
+        json_response(false, null, 'Staff name is required');
+    }
+    if ($hours <= 0) {
+        json_response(false, null, 'Hours must be greater than zero');
+    }
+
+    // Default department when UI omits it; use a seeded code that always exists
+    if ($deptCode === '') {
+        $deptCode = '3-DataEnt';
+    }
 
     if ($unitCost === null) {
         $rate = get_effective_rate($conn, $userId, $entryDate);
@@ -141,7 +243,7 @@ function list_summary(mysqli $conn, $params) {
     $year = isset($params['financial_year']) ? (int)$params['financial_year'] : null;
     $companyId = isset($params['company_id']) ? (int)$params['company_id'] : null;
 
-    $sql = "SELECT entry_date, entry_type, doc_no, staff_name, company_name, financial_year, department_code, description, '' AS description2, hours AS in_out_qty, unit_cost, total_cost, in_out FROM time_cost_entries WHERE entry_date BETWEEN ? AND ?";
+    $sql = "SELECT entry_id, entry_date, entry_type, doc_no, staff_name, company_name, financial_year, department_code, description, '' AS description2, hours AS in_out_qty, unit_cost, total_cost, in_out FROM time_cost_entries WHERE entry_date BETWEEN ? AND ?";
     $types = 'ss';
     $vals = [$from, $to];
     if ($dept) { $sql .= " AND department_code = ?"; $types .= 's'; $vals[] = $dept; }
@@ -186,6 +288,7 @@ function list_summary(mysqli $conn, $params) {
     } else {
         // Fallback when mysqlnd is not available
         $stmt->bind_result(
+            $entry_id,
             $entry_date,
             $entry_type,
             $doc_no,
@@ -206,6 +309,7 @@ function list_summary(mysqli $conn, $params) {
             $balQty += $sign * $qty;
             $balCost += $sign * (float)$total_cost;
             $rows[] = [
+                'entry_id' => (int)$entry_id,
                 'entry_date' => $entry_date,
                 'entry_type' => $entry_type,
                 'doc_no' => $doc_no,
@@ -227,6 +331,9 @@ function list_summary(mysqli $conn, $params) {
     $stmt->close();
     json_response(true, ['from' => $from, 'to' => $to, 'rows' => $rows, 'bf_qty' => round($balQty, 2), 'bf_cost' => round($balCost, 2)]);
 }
+
+// Auto-create schema on first use
+ensure_time_cost_schema($conn);
 
 $action = $_GET['action'] ?? $_POST['action'] ?? 'ping';
 

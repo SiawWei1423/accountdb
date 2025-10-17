@@ -17073,11 +17073,33 @@ function deleteTimeCostRow(btn) {
               <td>${Number(row.unit_cost).toFixed(2)}</td>
               <td>${Number(row.total_cost).toFixed(2)}</td>
               <td>${row.description ?? ''}</td>
-              <td>${row.description2 ?? ''}</td>`;
+              <td>${row.description2 ?? ''}</td>
+              <td>
+                <button class="btn btn-sm btn-outline-danger" data-entry-id="${row.entry_id ?? ''}" onclick="deleteTimeCostEntry(${row.entry_id ?? 'null'})">
+                  <i class=\"fa-solid fa-trash\"></i>
+                </button>
+              </td>`;
             tbody.appendChild(tr);
           });
         })
         .catch(err => { console.error(err); alert('Error loading list'); });
+    }
+
+    // Delete entry from list (server-side)
+    window.deleteTimeCostEntry = function(entryId){
+      if(!entryId){ alert('Missing entry id'); return; }
+      if(!confirm('Delete this time cost entry?')) return;
+      const params = new URLSearchParams();
+      params.set('action','delete_entry');
+      params.set('entry_id', String(entryId));
+      fetch('time_cost_handler.php', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: params.toString() })
+        .then(r=>r.json())
+        .then(resp=>{
+          if(!resp.ok){ alert(resp.message || 'Delete failed'); return; }
+          // refresh list after delete
+          loadTimeCostList();
+        })
+        .catch(err=>{ console.error(err); alert('Error deleting entry'); });
     }
     // Expose functions for sidebar link
     window.loadTimeCostSummary = loadTimeCostSummary;
